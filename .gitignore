@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 패키지/배포
+*.zip
+
+# 생성 산출물 (재생성 가능) — PNG·run 폴더
+*.png
+runs/
+
+# 데이터(.npy): 전부 무시하되, 실행에 필요한 최신 _final 맵 세트만 포함
+*.npy
+!heightmap_20260601_105333_final.npy
+!heightmap_20260601_105333_filled_final.npy
+!slope_20260601_105333_final.npy
+!cost_map_20260601_105333_final.npy
+!obstacle_20260601_105333_final.npy
