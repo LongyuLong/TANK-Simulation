@@ -347,51 +347,82 @@ def plan(start, goal, ts=None, cost_pref="risk", save=True, plot=True, apply_roc
     return path, st
 
 
-def plan_threat(start, goal, enemies, ts=None, w_surv=None,
-                save=True, plot=True):
-    """
-    [Option S] 위협-인지 글로벌 계획.
-      cost = base(돌 inf+마진 포함) + W_SURV_PLAN·hazard(채점기 생존체인)
-      → A* 가 −log(생존)+지형 을 최소화 = 생존 최대화. + 비용-인지 Theta* 스무싱.
+def _inject_obstacles(base_cost, obstacle, cells, margin_cost=None):
+    """런타임 인식 장애물 셀을 cost=inf + obstacle=True + 1셀 소프트 마진으로 주입."""
+    if not cells:
+        return
+    if margin_cost is None:
+        margin_cost = float(getattr(config, "ROCK_INFLATE_COST", 10.0))
+    rows, cols = base_cost.shape
+    for (r, c) in cells:
+        if 0 <= r < rows and 0 <= c < cols:
+            base_cost[r, c] = np.inf
+            obstacle[r, c] = True
+    for (r, c) in cells:                       # 소프트 마진 (본체 둘레 1셀)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and np.isfinite(base_cost[nr, nc]):
+                    base_cost[nr, nc] += margin_cost
 
-      start, goal : (row, col)
-      enemies     : list[risk.Enemy]  (정적 — 미션당 precompute 1회)
-    반환: (path, stats)
+
+def _threat_cost_map(bundle, enemies, extra_obstacles=None, w_surv=None):
+    """
+    Option S 비용맵 빌더 (plan_threat·replan 공통).
+      base(돌 + 런타임 장애물 inf+마진) + W_SURV·hazard.
+    반환: (cost_map, precomp, rock_mask, los_surface)
     """
     from . import eval as _eval   # 지연 import (순환참조 회피)
-
-    bundle = mapio.load_maps(ts)
     base = np.array(bundle.cost, dtype=float, copy=True)
-
     rock_mask = None
     los_surface = None
     if getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
         base, bundle.obstacle, rock_mask, los_surface = mapping.apply_virtual_rocks(
             base, bundle.obstacle, bundle.heightmap_filled)
-
-    # 적-의존 위협장 (돌 높이를 LoS 차폐면으로 반영 → P4)
-    precomp = _eval.precompute_threat(enemies, bundle, hm_los=los_surface)
+    if extra_obstacles:
+        _inject_obstacles(base, bundle.obstacle, extra_obstacles)
+    precomp = _eval.precompute_threat(enemies, bundle, hm_los=los_surface)   # 돌 높이 LoS 차폐
     cost_map = _eval.threat_cost(bundle, precomp, w_surv=w_surv, base_cost=base)
+    return cost_map, precomp, rock_mask, los_surface
+
+
+def plan_threat(start, goal, enemies, ts=None, w_surv=None,
+                extra_obstacles=None, save=True, plot=True, verbose=True):
+    """
+    [Option S] 위협-인지 글로벌 계획.
+      cost = base(돌·런타임장애물 inf+마진) + W_SURV_PLAN·hazard(채점기 생존체인)
+      → A*가 −log(생존)+지형 최소화 = 생존 최대화. + 비용-인지 Theta* 스무싱.
+      start, goal     : (row, col)
+      enemies         : list[risk.Enemy]
+      extra_obstacles : 런타임 인식 장애물 셀 [(row,col)...] → inf+마진
+    반환: (path, stats)
+    """
+    bundle = mapio.load_maps(ts)
+    cost_map, precomp, rock_mask, los_surface = _threat_cost_map(
+        bundle, enemies, extra_obstacles=extra_obstacles, w_surv=w_surv)
     src = f"threat(W_SURV={w_surv if w_surv is not None else config.W_SURV_PLAN})"
 
     rows, cols = cost_map.shape
-    print(f"\n=== [Option S] 위협-인지 A* + Theta smoothing ===")
-    print(f"  출발: {start}  목적: {goal}  지도: {rows}×{cols}  비용: {src}")
-    print(f"  적 {len(enemies)}기, 위협>0 셀 {int((precomp.intensity>0).sum())}")
+    if verbose:
+        print(f"\n=== [Option S] 위협-인지 A* + Theta smoothing ===")
+        print(f"  출발: {start}  목적: {goal}  지도: {rows}×{cols}  비용: {src}")
+        print(f"  적 {len(enemies)}기, 위협>0 셀 {int((precomp.intensity>0).sum())}")
 
     raw_path = astar(start, goal, cost_map, bundle.heightmap_filled)
     if raw_path is None:
-        print("  [실패] 경로 없음")
+        if verbose:
+            print("  [실패] 경로 없음")
         return None, None
 
     path = theta_smooth_path(raw_path, cost_map)   # 비용-인지 스무싱
 
     raw_st = path_stats(raw_path, cost_map, bundle.slope, bundle.heightmap_filled)
     st     = path_stats(path,     cost_map, bundle.slope, bundle.heightmap_filled)
-    print(f"  [raw]   wp {raw_st['waypoints']:3d}  통과셀 {raw_st['traversed_cells']:3d}  "
-          f"거리 {raw_st['distance_m']:.0f}m  비용 {raw_st['total_cost']:.1f}")
-    print(f"  [smooth]wp {st['waypoints']:3d}  통과셀 {st['traversed_cells']:3d}  "
-          f"거리 {st['distance_m']:.0f}m  비용 {st['total_cost']:.1f}")
+    if verbose:
+        print(f"  [raw]   wp {raw_st['waypoints']:3d}  통과셀 {raw_st['traversed_cells']:3d}  "
+              f"거리 {raw_st['distance_m']:.0f}m  비용 {raw_st['total_cost']:.1f}")
+        print(f"  [smooth]wp {st['waypoints']:3d}  통과셀 {st['traversed_cells']:3d}  "
+              f"거리 {st['distance_m']:.0f}m  비용 {st['total_cost']:.1f}")
 
     ts_now = mapio.timestamp()
     if plot:
@@ -400,8 +431,97 @@ def plan_threat(start, goal, enemies, ts=None, w_surv=None,
     if save:
         arr = np.array([[r * config.GRID_RES, c * config.GRID_RES] for r, c in path])
         mapio.save_array(f"path_{ts_now}.npy", arr)
-        print(f"[저장] path_{ts_now}.npy  {arr.shape}")
+        if verbose:
+            print(f"[저장] path_{ts_now}.npy  {arr.shape}")
     return path, st
+
+
+# ══════════════════════════════════════════════════════════
+#  SA 계약 — 런타임 접촉 시 재계획 / 결심 근거
+# ══════════════════════════════════════════════════════════
+def replan_on_contact(current_pos, goal, known_enemies, *,
+                      extra_obstacles=None, ts=None, w_surv=None,
+                      save=False, plot=False, verbose=False):
+    """
+    [SA] 런타임 접촉 재계획. 현재위치→goal, 갱신된 월드(적/장애물)로 plan_threat 재호출.
+      known_enemies   : 갱신된 전체 known-set (호출자가 새 적 포함)
+      extra_obstacles : 런타임 인식 장애물 셀
+    반환: (path, stats)  실패 시 (None, None). D* 도입 시 내부만 교체.
+    """
+    return plan_threat(current_pos, goal, known_enemies, ts=ts, w_surv=w_surv,
+                       extra_obstacles=extra_obstacles,
+                       save=save, plot=plot, verbose=verbose)
+
+
+def assess_contact(current_pos, goal, known_enemies, new_enemy, ts=None, w_surv=None):
+    """
+    [SA] 적 접촉 결심 '근거' 산출. 결정(engage/bypass)은 호출자(로컬 stub→web 운용자).
+    반환 dict:
+      self_risk   현재위치에서 new_enemy에 대한 피격확률(~1초 노출, 0~1)
+      can_engage  내가 new_enemy를 칠 수 있나 (LoS+우리 사거리)
+      bypass_cost 회피 재계획 경로비용 (None=경로없음)
+      blocks_goal 회피 경로 없으면 True
+      bypass_path 회피 경로(있으면) — bypass 결정 시 즉시 사용
+    """
+    from . import eval as _eval
+    from . import risk as _risk
+    bundle = mapio.load_maps(ts)
+
+    # 돌 높이 LoS 차폐면 (평가 LoS에 동일 적용)
+    los_surface = None
+    if getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
+        _b = np.array(bundle.cost, float, copy=True)
+        _b, bundle.obstacle, _rm, los_surface = mapping.apply_virtual_rocks(
+            _b, bundle.obstacle, bundle.heightmap_filled)
+    los = los_surface if los_surface is not None else bundle.heightmap_filled
+
+    # self_risk: new_enemy 단독 위협장의 현재위치 p_hit (~1초 노출)
+    pc = _eval.precompute_threat([new_enemy], bundle, hm_los=los_surface)
+    r, c = int(current_pos[0]), int(current_pos[1])
+    expo = 1.0 - np.exp(-1.0 / config.T_EXPOSE)
+    self_risk = float(pc.intensity[r, c] * pc.concealment[r, c] * expo
+                      * config.PK_BASE * pc.cover[r, c])
+
+    # can_engage: 우리(전차)가 적을 보고+사거리 내인가
+    our_range = config.WEAPON_RANGE.get("tank", 130)
+    can_engage = False
+    for (er, ec) in new_enemy.positions:
+        d = np.hypot(er - r, ec - c) * config.GRID_RES
+        if d <= our_range and _risk.is_visible(los, r, c, config.K2_HEIGHT_M,
+                                               er, ec, config.OBS_HEIGHT[new_enemy.etype]):
+            can_engage = True
+            break
+
+    # bypass: new_enemy 포함 재계획 (선택 시 즉시 사용 가능하도록 경로까지 반환)
+    bypass_path, bypass_st = replan_on_contact(
+        current_pos, goal, list(known_enemies) + [new_enemy], ts=ts, w_surv=w_surv)
+
+    return {
+        "self_risk": round(self_risk, 3),
+        "can_engage": bool(can_engage),
+        "bypass_cost": (float(round(bypass_st["total_cost"], 1)) if bypass_st else None),
+        "blocks_goal": bypass_path is None,
+        "bypass_path": bypass_path,
+    }
+
+
+def decide_engagement(assessment, policy="balanced", risk_thresh=0.5):
+    """
+    [참고 stub] 교전 결심. **실제 소유는 로컬/web 운용자** — 이 함수는 교체용 기본정책.
+      policy: "stealth"(회피우선) | "balanced" | "aggressive"
+    반환: "engage" | "bypass"
+    """
+    a = assessment
+    if policy == "aggressive":
+        return "engage" if a["can_engage"] else "bypass"
+    if policy == "stealth":
+        return "engage" if (a["blocks_goal"] and a["can_engage"]) else "bypass"
+    # balanced
+    if not a["can_engage"]:
+        return "bypass"
+    if a["blocks_goal"]:
+        return "engage"
+    return "engage" if a["self_risk"] <= risk_thresh else "bypass"
 
 
 def _plot_threat(path, b, cost_map, precomp, enemies, start, goal, src, ts,
