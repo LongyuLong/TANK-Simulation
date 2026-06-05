@@ -10,6 +10,12 @@ __pycache__/
 *.png
 runs/
 
+# 모델 가중치·런타임 임시 (patch)
+*.pt
+temp_*.jpg
+temp_*.jpeg
+**/waypoints.json
+
 # 데이터(.npy): 전부 무시하되, 실행에 필요한 최신 _final 맵 세트만 포함
 *.npy
 !heightmap_20260601_105333_final.npy
