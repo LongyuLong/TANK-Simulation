@@ -5,11 +5,13 @@ import json
 # Pure Pursuit + PD 제어 설정
 # ============================================================
 WAYPOINT_FILE     = 'waypoints.json'
-ARRIVAL_RADIUS    = 5.0
+ARRIVAL_RADIUS    = 6.0      # 도달 판정 반경 (뱅뱅 방지 위해 약간 넉넉히)
 HEADING_THRESHOLD = 5.0
-MOVE_WEIGHT       = 0.7
+MOVE_WEIGHT       = 0.45     # 기본 전진 속도 ↓ (천천히 정확하게)
 LOOKAHEAD_MIN     = 5.0
-LOOKAHEAD_MAX     = 20.0
+LOOKAHEAD_MAX     = 18.0
+MISS_LIMIT        = 25       # 연속으로 가까워지지 않으면 궤도이탈로 보고 다음 WP 스킵
+ROTATE_IN_PLACE_DEG = 60.0   # 이 이상 오차면 전진 멈추고 제자리 선회
 
 KP = 0.015
 KD = 0.020
@@ -101,7 +103,7 @@ def pure_pursuit(pos_x, pos_z, heading_deg, wp_index):
     cur_wp      = waypoints[wp_index]
     dist_to_wp  = math.hypot(cur_wp['x'] - pos_x, cur_wp['z'] - pos_z)
 
-    # 최근접 거리 갱신
+    # 최근접 거리 갱신 (자동 스킵 없음 — 성실 추종)
     if dist_to_wp < wp_min_dist:
         wp_min_dist   = dist_to_wp
         wp_miss_count = 0
@@ -139,15 +141,17 @@ def pure_pursuit(pos_x, pos_z, heading_deg, wp_index):
         move_ad     = ""
         move_weight = BASE_SPEED * speed_factor
         turn_weight = 0.0
-    elif abs_error <= 45.0:
+    elif abs_error <= 30.0:
         move_ad     = "D" if error > 0 else "A"
-        move_weight = BASE_SPEED * speed_factor
-    elif abs_error <= 80.0:
+        move_weight = BASE_SPEED * speed_factor * 0.8
+    elif abs_error <= ROTATE_IN_PLACE_DEG:
         move_ad     = "D" if error > 0 else "A"
-        move_weight = max(0.4, 0.6 * speed_factor)
+        move_weight = BASE_SPEED * speed_factor * 0.4
     else:
+        # 큰 오차 → 전진 멈추고 제자리 선회 (overshoot/뱅뱅 차단)
         move_ad     = "D" if error > 0 else "A"
-        move_weight = 0.3
+        move_weight = 0.0
+        turn_weight = max(turn_weight, 0.6)
 
     print(f"🎛️ PD | error:{error:.1f}° d_err:{d_error:.1f}° → turn:{turn_weight:.2f} move:{move_weight:.2f}")
 

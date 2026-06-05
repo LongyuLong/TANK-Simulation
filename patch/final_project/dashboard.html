@@ -57,6 +57,13 @@
     position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.6);
     padding: 4px 8px; border-radius: 4px; font-size: 10px; color: #a0a0c0;
   }
+
+  #layers .layer { margin-top: 10px; }
+  #layers .layer-title { font-size: 10px; color: #a0a0c0; margin-bottom: 3px; }
+  #layers canvas {
+    width: 100%; height: auto; border: 1px solid #0f3460; border-radius: 4px;
+    image-rendering: pixelated; background: #000;
+  }
 </style>
 </head>
 <body>
@@ -98,9 +105,15 @@
     </div>
   </div>
 
-  <div class="card" style="flex:1">
+  <div class="card">
     <h3>로그</h3>
     <div id="log"></div>
+  </div>
+
+  <div class="card">
+    <h3>레이어 (스크롤 ↓)</h3>
+    <button class="btn btn-clear" onclick="refreshLayers()">🔄 레이어 갱신</button>
+    <div id="layers"></div>
   </div>
 </div>
 
@@ -111,8 +124,8 @@
 </div>
 
 <script>
-// ── 맵 범위 (path_planner와 동일) ──
-const MAP = { xMin: 40, xMax: 310, zMin: 10, zMax: 310 };
+// ── 맵 범위 (우리 글로벌 플래너 grid: 0~300, 5m/cell) ──
+const MAP = { xMin: 0, xMax: 300, zMin: 0, zMax: 300 };
 
 // ── 상태 ──
 let state = {
@@ -298,6 +311,7 @@ function planPath() {
       state.path = d.waypoints;
       addLog(`✅ 경로 수신: ${d.waypoints.length}개 WP`);
       draw();
+      refreshLayers();   // 위협 레이어 갱신(known-set 반영)
     } else {
       addLog('❌ 경로 계획 실패: ' + (d.error || ''));
     }
@@ -308,6 +322,69 @@ function clearPath() {
   state.path = [];
   addLog('경로 초기화');
   draw();
+}
+
+// ── 레이어 갤러리 (JSON 그리드 → 미니맵) ──
+const LAYER_DEFS = [
+  { key: 'heightmap',   label: '고도 (Heightmap)',     cmap: 'terrain' },
+  { key: 'threat',      label: '위협 (Threat)',         cmap: 'inferno' },
+  { key: 'cover',       label: '엄폐 (Cover)',          cmap: 'viridis' },
+  { key: 'concealment', label: '은폐 (Concealment)',    cmap: 'viridis' },
+  { key: 'ridge_risk',  label: '능선 노출 (Ridge)',      cmap: 'inferno' },
+  { key: 'open_risk',   label: '개활 (Open)',           cmap: 'inferno' },
+  { key: 'slope',       label: '경사 (Slope)',          cmap: 'inferno' },
+];
+
+const CMAPS = {
+  terrain: [[40,80,160],[60,150,90],[180,200,90],[140,100,60],[240,240,240]],
+  inferno: [[0,0,4],[85,15,109],[187,55,84],[249,142,9],[252,255,164]],
+  viridis: [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]],
+};
+
+function colormap(t, name) {
+  t = Math.max(0, Math.min(1, t));
+  const s = CMAPS[name] || CMAPS.inferno;
+  const seg = s.length - 1, f = t * seg, i = Math.min(seg - 1, Math.floor(f)), u = f - i;
+  const a = s[i], b = s[i + 1];
+  return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u];
+}
+
+function drawGrid(cv, grid, cmapName, enemies, objects) {
+  const n = grid.length, ctx = cv.getContext('2d');
+  let mn = Infinity, mx = -Infinity;
+  for (let r=0;r<n;r++) for (let c=0;c<n;c++){ const v=grid[r][c]; if(isFinite(v)){ if(v<mn)mn=v; if(v>mx)mx=v; } }
+  const span = (mx - mn) || 1;
+  const img = ctx.createImageData(n, n);
+  for (let r=0;r<n;r++) for (let c=0;c<n;c++){
+    const [R,G,B] = colormap((grid[r][c]-mn)/span, cmapName);
+    const y = n-1-r;                       // z 위로 (메인맵과 동일 방향)
+    const idx = (y*n + c)*4;
+    img.data[idx]=R; img.data[idx+1]=G; img.data[idx+2]=B; img.data[idx+3]=255;
+  }
+  ctx.putImageData(img, 0, 0);
+  if (objects) { ctx.fillStyle='rgba(255,255,255,0.55)'; objects.forEach(([r,c])=>ctx.fillRect(c,(n-1-r),1,1)); }
+  if (enemies) { ctx.fillStyle='#00e5ff'; enemies.forEach(([r,c])=>ctx.fillRect(c-1,(n-1-r)-1,3,3)); }
+}
+
+function refreshLayers() {
+  fetch('/layers').then(r=>r.json()).then(d=>{
+    if (d.error) { addLog('레이어 실패: '+d.error); return; }
+    const cont = document.getElementById('layers');
+    LAYER_DEFS.forEach(def=>{
+      const grid = d.grids[def.key];
+      if (!grid) return;
+      let cv = document.getElementById('cv-'+def.key);
+      if (!cv) {
+        const block = document.createElement('div'); block.className='layer';
+        block.innerHTML = `<div class="layer-title">${def.label}</div>`;
+        cv = document.createElement('canvas'); cv.id='cv-'+def.key;
+        cv.width = d.grid_n; cv.height = d.grid_n;
+        block.appendChild(cv); cont.appendChild(block);
+      }
+      drawGrid(cv, grid, def.cmap, d.enemies, d.objects);
+    });
+    addLog('레이어 갱신');
+  }).catch(e=>addLog('레이어 오류: '+e));
 }
 
 // ── 유틸 ──
@@ -322,6 +399,7 @@ function addLog(msg) {
 
 resize();
 addLog('대시보드 시작');
+refreshLayers();   // 시작 시 레이어 로드
 </script>
 </body>
 </html>

@@ -94,15 +94,19 @@ def _safe_score_result(P_survive: float = 0.0,
 
 
 def precompute_threat(enemies: list[risk.Enemy], bundle: mapio.MapBundle,
-                      hm_los: np.ndarray | None = None) -> Threat:
+                      hm_los: np.ndarray | None = None,
+                      obstacle_override: np.ndarray | None = None) -> Threat:
     """
     적 위치 고정 가정 하에 셀별 위협을 1회 계산.
       intensity[cell] = max over (적위치) [ p_range·p_engage·p_hit ]
                         단, is_visible 이고 무기/탐지 사거리 이내일 때만.
     은폐·엄폐는 적과 무관한 지형항이라 별도 배열로.
 
-    hm_los : LoS(is_visible) 계산용 차폐면. None이면 지면 heightmap.
-             돌이 있으면 los_surface(=지형+돌높이)를 넘겨 돌 그림자(사각)를 반영(P4).
+    hm_los            : LoS(is_visible) + 능선 계산용 차폐면. None이면 지면 heightmap.
+                        오브젝트가 있으면 los_surface(=지형+오브젝트높이)를 넘겨
+                        돌 그림자(사각)·능선 노출 감소를 반영. (heightmap/slope 는 불변)
+    obstacle_override : 개활(open_risk) 엄폐밀도 계산용 obstacle 마스크.
+                        None이면 bundle.obstacle. 오브젝트 셀을 추가해 엄폐 반영.
     """
     hm = bundle.heightmap_filled
     los = hm_los if hm_los is not None else hm
@@ -130,8 +134,11 @@ def precompute_threat(enemies: list[risk.Enemy], bundle: mapio.MapBundle,
                         intensity[r, c] = val
 
     # 지형항 (적 무관) — fresh 계산 (비용맵 저장본을 끌어오지 않음)
-    ridge = risk.make_ridge_risk(hm)
-    open_ = risk.make_open_risk(bundle.obstacle, bundle.cost)
+    #   ridge: los_surface(오브젝트 높이 포함)로 → 돌 옆은 주변평균↑ → 능선노출↓
+    #   open : 오브젝트 셀 추가한 obstacle 마스크로 → 돌 옆 엄폐밀도↑ → 개활↓
+    ridge = risk.make_ridge_risk(los)
+    obst_for_open = obstacle_override if obstacle_override is not None else bundle.obstacle
+    open_ = risk.make_open_risk(obst_for_open, bundle.cost)
     concealment = np.clip(1.0 - 0.4 * ridge - 0.4 * open_, 0.1, 1.0)
     cover = config.COVER_FLOOR + (1.0 - config.COVER_FLOOR) * open_
     return Threat(intensity, concealment, cover)

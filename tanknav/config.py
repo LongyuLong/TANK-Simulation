@@ -97,6 +97,22 @@ COVER_FLOOR = 0.6    # 완전 엄폐(open_risk=0) 시 cover_factor 하한 (Pk 40
 #   클수록 생존 우선(우회↑), 작을수록 지형/거리 우선(직선↑).
 W_SURV_PLAN = 20.0
 
+# ── 맵 설치 오브젝트 타입별 파라미터 ─────────────────────────
+# height_mult : K2 전고(K2_HEIGHT_M=2.4m) 대비 높이 배수.
+#               los_surface(능선·개활·은폐·LoS 위협)에만 반영 — heightmap/slope 에는 반영 X.
+# risk        : True면 위 risk 레이어 반영. cost(inf+마진)는 활성 타입 모두 적용.
+# 맵 prefab(Rock002 등)은 정규화(소문자+앞자리0제거: Rock002→rock2)되어 이 키와 매칭.
+# 주석 해제 = 해당 타입을 계획/리스크에 포함.
+OBJECT_TYPES = {
+    # "rock1": {"height_mult": 1.1, "risk": True},
+    "rock2": {"height_mult": 1.1, "risk": True},     # ← Test1.map 설치물(현재 활성)
+    # "car1":  {"height_mult": 0.8, "risk": True},
+    # "car2":  {"height_mult": 0.8, "risk": True},
+    # "car3":  {"height_mult": 0.8, "risk": True},
+    # "wall1": {"height_mult": 1.5, "risk": True},
+    # "wall2": {"height_mult": 1.5, "risk": True},
+}
+
 # 적 무기 유효사거리 (m) — etype 키.  평지-평지 최대사거리 130m (sim 제원).
 #   DETECT(80) < WEAPON(130) 이라 2/3선(~87m)이 탐지밖 → p_engage 사실상 1.
 #   (고지에서 사거리 증가 규칙은 v2)

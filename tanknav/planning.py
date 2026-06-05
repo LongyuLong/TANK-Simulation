@@ -366,28 +366,32 @@ def _inject_obstacles(base_cost, obstacle, cells, margin_cost=None):
                     base_cost[nr, nc] += margin_cost
 
 
-def _threat_cost_map(bundle, enemies, extra_obstacles=None, w_surv=None):
+def _threat_cost_map(bundle, enemies, extra_obstacles=None, w_surv=None,
+                     los_surface=None, obstacle_override=None):
     """
     Option S 비용맵 빌더 (plan_threat·replan 공통).
-      base(돌 + 런타임 장애물 inf+마진) + W_SURV·hazard.
+      base(오브젝트 + 런타임 장애물 inf+마진) + W_SURV·hazard.
+      los_surface/obstacle_override : 오브젝트 높이/마스크 → risk(능선·개활·LoS) 반영
+                                      (어댑터가 config.OBJECT_TYPES로 빌드해 전달).
     반환: (cost_map, precomp, rock_mask, los_surface)
     """
     from . import eval as _eval   # 지연 import (순환참조 회피)
     base = np.array(bundle.cost, dtype=float, copy=True)
     rock_mask = None
-    los_surface = None
-    if getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
+    if los_surface is None and getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
         base, bundle.obstacle, rock_mask, los_surface = mapping.apply_virtual_rocks(
             base, bundle.obstacle, bundle.heightmap_filled)
     if extra_obstacles:
         _inject_obstacles(base, bundle.obstacle, extra_obstacles)
-    precomp = _eval.precompute_threat(enemies, bundle, hm_los=los_surface)   # 돌 높이 LoS 차폐
+    precomp = _eval.precompute_threat(enemies, bundle, hm_los=los_surface,
+                                      obstacle_override=obstacle_override)
     cost_map = _eval.threat_cost(bundle, precomp, w_surv=w_surv, base_cost=base)
     return cost_map, precomp, rock_mask, los_surface
 
 
 def plan_threat(start, goal, enemies, ts=None, w_surv=None,
-                extra_obstacles=None, save=True, plot=True, verbose=True):
+                extra_obstacles=None, los_surface=None, obstacle_override=None,
+                save=True, plot=True, verbose=True):
     """
     [Option S] 위협-인지 글로벌 계획.
       cost = base(돌·런타임장애물 inf+마진) + W_SURV_PLAN·hazard(채점기 생존체인)
@@ -399,7 +403,8 @@ def plan_threat(start, goal, enemies, ts=None, w_surv=None,
     """
     bundle = mapio.load_maps(ts)
     cost_map, precomp, rock_mask, los_surface = _threat_cost_map(
-        bundle, enemies, extra_obstacles=extra_obstacles, w_surv=w_surv)
+        bundle, enemies, extra_obstacles=extra_obstacles, w_surv=w_surv,
+        los_surface=los_surface, obstacle_override=obstacle_override)
     src = f"threat(W_SURV={w_surv if w_surv is not None else config.W_SURV_PLAN})"
 
     rows, cols = cost_map.shape
@@ -440,20 +445,23 @@ def plan_threat(start, goal, enemies, ts=None, w_surv=None,
 #  SA 계약 — 런타임 접촉 시 재계획 / 결심 근거
 # ══════════════════════════════════════════════════════════
 def replan_on_contact(current_pos, goal, known_enemies, *,
-                      extra_obstacles=None, ts=None, w_surv=None,
-                      save=False, plot=False, verbose=False):
+                      extra_obstacles=None, los_surface=None, obstacle_override=None,
+                      ts=None, w_surv=None, save=False, plot=False, verbose=False):
     """
     [SA] 런타임 접촉 재계획. 현재위치→goal, 갱신된 월드(적/장애물)로 plan_threat 재호출.
-      known_enemies   : 갱신된 전체 known-set (호출자가 새 적 포함)
-      extra_obstacles : 런타임 인식 장애물 셀
+      known_enemies                 : 갱신된 전체 known-set (호출자가 새 적 포함)
+      extra_obstacles               : 런타임 인식 장애물 셀(cost)
+      los_surface/obstacle_override : 정적 오브젝트 risk 반영(어댑터가 빌드)
     반환: (path, stats)  실패 시 (None, None). D* 도입 시 내부만 교체.
     """
     return plan_threat(current_pos, goal, known_enemies, ts=ts, w_surv=w_surv,
-                       extra_obstacles=extra_obstacles,
+                       extra_obstacles=extra_obstacles, los_surface=los_surface,
+                       obstacle_override=obstacle_override,
                        save=save, plot=plot, verbose=verbose)
 
 
-def assess_contact(current_pos, goal, known_enemies, new_enemy, ts=None, w_surv=None):
+def assess_contact(current_pos, goal, known_enemies, new_enemy, ts=None, w_surv=None,
+                   los_surface=None, obstacle_override=None):
     """
     [SA] 적 접촉 결심 '근거' 산출. 결정(engage/bypass)은 호출자(로컬 stub→web 운용자).
     반환 dict:
@@ -462,21 +470,21 @@ def assess_contact(current_pos, goal, known_enemies, new_enemy, ts=None, w_surv=
       bypass_cost 회피 재계획 경로비용 (None=경로없음)
       blocks_goal 회피 경로 없으면 True
       bypass_path 회피 경로(있으면) — bypass 결정 시 즉시 사용
+    los_surface/obstacle_override : 정적 오브젝트 risk 반영(어댑터가 빌드).
     """
     from . import eval as _eval
     from . import risk as _risk
     bundle = mapio.load_maps(ts)
 
-    # 돌 높이 LoS 차폐면 (평가 LoS에 동일 적용)
-    los_surface = None
-    if getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
+    if los_surface is None and getattr(config, "ENABLE_VIRTUAL_ROCKS", False):
         _b = np.array(bundle.cost, float, copy=True)
         _b, bundle.obstacle, _rm, los_surface = mapping.apply_virtual_rocks(
             _b, bundle.obstacle, bundle.heightmap_filled)
     los = los_surface if los_surface is not None else bundle.heightmap_filled
 
     # self_risk: new_enemy 단독 위협장의 현재위치 p_hit (~1초 노출)
-    pc = _eval.precompute_threat([new_enemy], bundle, hm_los=los_surface)
+    pc = _eval.precompute_threat([new_enemy], bundle, hm_los=los_surface,
+                                 obstacle_override=obstacle_override)
     r, c = int(current_pos[0]), int(current_pos[1])
     expo = 1.0 - np.exp(-1.0 / config.T_EXPOSE)
     self_risk = float(pc.intensity[r, c] * pc.concealment[r, c] * expo
@@ -494,7 +502,8 @@ def assess_contact(current_pos, goal, known_enemies, new_enemy, ts=None, w_surv=
 
     # bypass: new_enemy 포함 재계획 (선택 시 즉시 사용 가능하도록 경로까지 반환)
     bypass_path, bypass_st = replan_on_contact(
-        current_pos, goal, list(known_enemies) + [new_enemy], ts=ts, w_surv=w_surv)
+        current_pos, goal, list(known_enemies) + [new_enemy], ts=ts, w_surv=w_surv,
+        los_surface=los_surface, obstacle_override=obstacle_override)
 
     return {
         "self_risk": round(self_risk, 3),

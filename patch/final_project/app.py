@@ -1,3 +1,7 @@
+# OpenMP 중복 런타임(libiomp5md.dll) 충돌 회피 — torch/numpy import '전에' 설정 필수.
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from flask import Flask, request, jsonify, Response, send_file
 import torch
 import json
@@ -33,9 +37,11 @@ dynamic_obstacles = []
 goal              = {'x': 142.47, 'z': 214.1}
 current_pos       = {'x': START_X, 'z': START_Z}   # 최신 전차 위치 (SA 재계획용)
 
-# 정적 장애물: 기본은 '없음'(빈 맵). 오브젝트를 설치·저장한 맵이 있을 때만 로드.
-#   (new_map3.map 은 patch 작성자의 예시 — 자동 로드하지 않음)
-MAP_FILE = None   # 예: 'my_scenario.map' 으로 지정하면 그 맵의 정적 장애물 로드
+# 정적 장애물: 오브젝트를 설치·저장한 맵에서 로드 (없으면 빈 맵 = 지형만).
+#   동적(차/사람)은 sim_adapter가 자동 제외 → 런타임 인식으로 처리.
+#   경로는 환경변수 TANK_MAP_FILE 로 덮어쓸 수 있음(이식성). 없으면 아래 기본값.
+MAP_FILE = os.environ.get(
+    "TANK_MAP_FILE", r"C:\Users\acorn\Documents\Tank Challenge\map\Test1.map")
 obstacle_list = []
 if MAP_FILE:
     try:
@@ -43,8 +49,13 @@ if MAP_FILE:
         print(f"🗺️  맵 로드: {MAP_FILE} ({len(obstacle_list)}개 정적 장애물)")
     except FileNotFoundError:
         print(f"⚠️  맵 파일 없음 ({MAP_FILE}) — 빈 맵으로 시작")
+    except Exception as e:
+        print(f"⚠️  맵 파싱 실패 ({MAP_FILE}): {e} — 빈 맵으로 시작")
 else:
     print("🗺️  빈 맵으로 시작 (정적 장애물 없음)")
+
+# 정적 오브젝트를 글로벌 플래너에 등록 (config.OBJECT_TYPES 활성 타입만 cost+risk 반영)
+sim_adapter.set_static_obstacles(obstacle_list)
 
 print("⏸️  경로 미설정 - 브라우저 localhost:5000 에서 목표를 설정하세요")
 
@@ -73,6 +84,16 @@ def broadcast(data: dict):
 @app.route('/')
 def dashboard():
     return send_file(os.path.join(BASE_DIR, 'dashboard.html'))
+
+
+@app.route('/layers')
+def layers():
+    """대시보드 레이어 그리드(heightmap/threat/risk…) JSON. 로드 시 + 계획/탐지 후 호출."""
+    try:
+        return jsonify(sim_adapter.layers())
+    except Exception as e:
+        print(f"⚠️ /layers 실패: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/stream')
@@ -138,12 +159,11 @@ def api_plan_path():
     gz = float(data.get('goal_z', goal['z']))
     goal = {'x': gx, 'z': gz}
 
-    all_obs = obstacle_list + dynamic_obstacles
-    if not all_obs:
-        return jsonify({'error': '장애물 정보 없음 - 먼저 시뮬레이터를 실행하세요'}), 400
-
-    print(f"🗺️  A* 계획: 목표=({gx},{gz}), 장애물={len(all_obs)}개")
-    wps = plan_path(all_obs, START_X, START_Z, gx, gz)
+    # 정적 오브젝트는 어댑터(set_static_obstacles)가 보유 → 여기선 동적만 전달.
+    sx, sz = current_pos['x'], current_pos['z']   # 현재 위치에서 계획
+    print(f"🗺️  계획: 출발=({sx:.0f},{sz:.0f}) 목표=({gx},{gz}) "
+          f"정적={len(obstacle_list)} 동적={len(dynamic_obstacles)}")
+    wps = plan_path(dynamic_obstacles, sx, sz, gx, gz)
     if wps is None:
         return jsonify({'error': 'A* 경로 탐색 실패'}), 500
 
@@ -291,9 +311,8 @@ def update_obstacle():
         logs.append(f"적전차@({ex:.0f},{ez:.0f}) risk={a['self_risk']} can_engage={a['can_engage']} → {d}")
         print(f"🎯 {logs[-1]}")
 
-    # 재계획: 정적맵 + 회피대상(blocker), 갱신된 known-set(threat) 반영
-    avoid = obstacle_list + blockers
-    wps = sim_adapter.replan(cxz, gxz, obstacles=avoid)
+    # 재계획: 정적 오브젝트(어댑터 보유) + 회피대상(blocker, 동적) + 갱신 known-set
+    wps = sim_adapter.replan(cxz, gxz, obstacles=blockers)
     if wps:
         pursuit.waypoints        = wps
         pursuit.current_wp_index = 0
